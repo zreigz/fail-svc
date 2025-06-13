@@ -1,0 +1,204 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: baenterpriseeks-test
+  labels:
+    capitalone.com/ba: baenterpriseeks
+    capitalone.com/owner: onekube.capitalone.com
+---
+apiVersion: deployments.plural.sh/v1alpha1
+kind: Project
+metadata:
+  name: baenterpriseeks-test
+spec:
+  name: baenterpriseeks-test
+  description: 'baenterpriseeks-test Plural Project'
+---
+apiVersion: deployments.plural.sh/v1alpha1
+kind: GitRepository
+metadata:
+  name: baenterpriseeks-test
+spec:
+  url: https://github.cloud.capitalone.com/onekube/onekube-cli-test-fleet.git
+  connectionRef:
+    name: onekube-gh
+---
+apiVersion: deployments.plural.sh/v1alpha1
+kind: ServiceDeployment
+metadata:
+  name: 'baenterpriseeks-test-fleet-bootstrap'
+  namespace: baenterpriseeks-test
+spec:
+  clusterRef:
+    kind: Cluster
+    name: plural-dev-use1
+    namespace: plural
+  contexts:
+    - core-addons-version-mapping
+  # git section configures where to find helm chart values
+  repositoryRef:
+    name: baenterpriseeks-test
+  git:
+    ref: main
+    folder: /
+  # helm section configures the Helm deployment.
+  helm:
+    repositoryRef:
+      name: core-addons
+    git:
+      ref: plural
+      folder: fleet-chart
+    valuesFiles:
+      - values.yaml.liquid
+    luaScript: |
+      print("Starting script")
+      function Node(name)
+        -- obj
+        local self = { nodes = {}, fileName = name, slashcount = select(2, string.gsub(name, "/", "")) }
+        local getName = function() return self.fileName end
+        local getNodes = function() return self.nodes end
+        local getSlashes = function() return self.slashcount end
+        local insertNode = function(n) table.insert(self.nodes, n) end
+        --[[ 
+        -- Returns the furthest node that matches the given name of n
+        -- Params, s self
+        --         n node to search for
+        -- returns nil if s does not match n
+        -- returns s if only s matches n
+        -- else returns furthest node
+        --]]
+        local findNode = function(s, n)
+          local a, _ = string.find(n.getName(), s.getName(), 1, true)
+          if a == nil then
+            return nil
+          end
+          for _, b in ipairs(s.getNodes()) do
+            ret = b:findNode(n)
+            if ret ~= nil then return ret end
+          end
+          return s
+        end
+        --[[ 
+        -- Runs a given function on all leaf nodes, call with callOnLastNode({}, function)
+        --   Execute function `f(n, l)` on the furthest nodes in the tree
+        --   given
+        --     `n` is the last node's onekube.yaml location
+        --     `l` is a list of node names to get to the furthest node
+        --]]
+        local callOnLastNode = function(l, f)
+          -- Must create a new array and copy elements or else the list will be appended too many times
+          local li = {}
+          for _, e in ipairs(l) do
+            table.insert(li, e)
+          end
+          table.insert(li, self.fileName)
+      
+          for _, n in ipairs(self.nodes) do
+            n.callOnLastNode(li, f)
+          end
+      
+          if #self.nodes == 0 then
+            f(self.fileName .. "onekube.yaml", li)
+          end
+        end
+        return {
+          getNodes = getNodes,
+          insertNode = insertNode,
+          getName = getName,
+          getSlashes = getSlashes,
+          findNode = findNode,
+          printNodes = printNodes,
+          printNodesS = printNodesS,
+          callOnLastNode = callOnLastNode
+        }
+      end
+      --[[
+      -- Combines t2 into t1, appends arrays
+      --]]
+      function mergeYamlTables(t1, t2)
+        for k, v in pairs(t2) do
+          -- numbered keys are handled by table.insert(), ignore top-level number keys
+          if type(k) ~= "number" then
+            if type(v) == "table" then
+              if type(t1[k]) == "table" then
+                -- appends only array values (number keys), does not move string keys
+                for i=1,#v do
+                  table.insert(t1[k], v[i])           
+                end 
+                mergeYamlTables(t1[k], t2[k])
+              else
+              -- overwrite if t2 is an table and t1 isn't
+                t1[k] = v
+              end
+            else
+              t1[k] = v
+            end
+          end
+        end
+      end
+      -- Init vars
+      root = {nodes = {}}
+      nodes = {}
+      output = {spec = {clusters = {}}}
+      
+      -- Given a list of files, search for all files named `onekube.yaml`
+      dirtree = fs.walk(".")
+      print("Walking dir: .") -- debug
+      for _, filename in ipairs(dirtree) do
+        a, _ = string.find(filename, "onekube.yaml")
+        if a ~= nil then
+          print("Walking file: " .. filename) -- debug
+          -- Truncate `onekube.yaml` from all found files, this allows string.find() to match in building the tree
+          node = Node(string.sub(filename, 0, a - 1))
+          table.insert(nodes, node)
+        end
+      end
+      
+      -- Sort in ascending order by `/` count
+      table.sort(nodes, function(x, y)
+        return x.getSlashes() < y.getSlashes()
+      end)
+      
+      -- Add nodes to `root` tree
+      for _, node in ipairs(nodes) do
+        skip = false
+        for _, n in ipairs(root.nodes) do
+          iNode = n:findNode(node)
+          if iNode ~= nil then
+            iNode.insertNode(node)
+            skip = true
+            break
+          end 
+        end 
+        if not skip then
+          table.insert(root.nodes, node)
+        end 
+      end
+      -- merge files
+      for _, n in ipairs(root.nodes) do
+        n.callOnLastNode({}, function(n, l)
+          print("Running on node: " .. n) -- debug
+          -- get clusterName
+          local content = fs.read(n)
+          local config = {}
+          if content then
+            config = encoding.yamlDecode(content)
+          else
+            error("Unreadable yaml: " .. n) 
+          end
+          clusterName = config.clusterName
+      
+          yaml = {}
+          for _, file in ipairs(l) do
+            content = fs.read(file .. "onekube.yaml")
+            local data = encoding.yamlDecode(content)
+            mergeYamlTables(yaml, data)
+          end
+          outputValues = { values = yaml }
+          output.spec.clusters[clusterName or "__e"] = outputValues
+        end)
+      end
+      -- drop any values from onekube.yamls that don't have `clusterName` (usually incomplete or placeholder onekube.yamls)
+      output.spec.clusters["__e"] = nil
+      --values = encoding.yamlEncode(output)
+      values = output
