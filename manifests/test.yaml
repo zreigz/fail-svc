@@ -24,6 +24,14 @@ spec:
     name: onekube-gh
 ---
 apiVersion: deployments.plural.sh/v1alpha1
+kind: Cluster
+metadata:
+  name: lukasz
+  namespace: default
+spec:
+  handle: lukasz
+---
+apiVersion: deployments.plural.sh/v1alpha1
 kind: ServiceDeployment
 metadata:
   name: 'baenterpriseeks-test-fleet-bootstrap'
@@ -31,8 +39,8 @@ metadata:
 spec:
   clusterRef:
     kind: Cluster
-    name: plural-dev-use1
-    namespace: plural
+    name: lukasz
+    namespace: default
   contexts:
     - core-addons-version-mapping
   # git section configures where to find helm chart values
